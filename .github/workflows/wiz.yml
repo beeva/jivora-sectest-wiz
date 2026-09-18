@@ -1,0 +1,89 @@
+name: wiz
+
+# Wiz's centre of gravity is a connected cloud account, which this repository
+# cannot supply. What it can exercise is Wiz Code: the wizcli scanner over IaC,
+# directory contents (secrets + vulnerable dependencies) and built images.
+#
+# Read the result with that caveat in mind. A weak showing here is not a weak
+# showing for Wiz -- it is a signal about whether Wiz is the right shape for a
+# codebase that has no cloud footprint yet. The infra/terraform and infra/k8s
+# trees describe the deployment Jivora would have *after* a cloud migration,
+# which is the scenario where Wiz starts to make sense.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wizcli:
+    name: Wiz CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install wizcli
+        run: |
+          curl -fsSL -o wizcli https://wizcli.app.wiz.io/latest/wizcli-linux-amd64
+          chmod +x wizcli
+          sudo mv wizcli /usr/local/bin/wizcli
+          wizcli version
+
+      - name: Authenticate
+        env:
+          WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+        run: wizcli auth --id "$WIZ_CLIENT_ID" --secret "$WIZ_CLIENT_SECRET"
+
+      - name: IaC scan - Terraform
+        continue-on-error: true
+        run: wizcli iac scan --path infra/terraform --name jivora-terraform
+
+      - name: IaC scan - Kubernetes
+        continue-on-error: true
+        run: wizcli iac scan --path infra/k8s --name jivora-k8s
+
+      - name: IaC scan - Compose and Dockerfiles
+        continue-on-error: true
+        run: wizcli iac scan --path . --name jivora-compose
+
+      - name: Directory scan - secrets and dependencies
+        continue-on-error: true
+        run: wizcli dir scan --path . --name jivora-repo --secrets
+
+  images:
+    name: Container image scan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: Jivora-backend
+            tag: jivora/backend:sectest
+          - app: jivora-web
+            tag: jivora/web:sectest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install wizcli
+        run: |
+          curl -fsSL -o wizcli https://wizcli.app.wiz.io/latest/wizcli-linux-amd64
+          chmod +x wizcli
+          sudo mv wizcli /usr/local/bin/wizcli
+
+      - name: Authenticate
+        env:
+          WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+          WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+        run: wizcli auth --id "$WIZ_CLIENT_ID" --secret "$WIZ_CLIENT_SECRET"
+
+      - name: Build image
+        run: docker build -t ${{ matrix.tag }} ${{ matrix.app }}
+
+      - name: Scan image
+        continue-on-error: true
+        run: wizcli docker scan --image ${{ matrix.tag }} --dockerfile ${{ matrix.app }}/Dockerfile
